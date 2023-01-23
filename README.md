@@ -1,1 +1,3 @@
-# stat
+These files contain some previous projects that I undertook in exploration of some topics through a data science lense. 
+
+These specific files relate to a project relating to whether CarGurus was inflating their price assessments of used cars to encourage purchases. I utilized web scraping to collect the data. Note that CarGurus is only proving "Great Deal" or "Good Deal" used cars which results in a biased dataset. I found out that individual used cars do not have their individual websites, but just a separate part of the search page. I found out a way to get all of the other cars, but need more time to implement. 
