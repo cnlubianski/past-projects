@@ -1,0 +1,226 @@
+---
+title: "Final Project"
+author: "Corbin Lubianski"
+date: "2023-04-22"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.retina = 2)
+```
+
+
+## Read packages
+
+```{r}
+# Read packages
+if (!require(readxl)) install.packages("readxl"); library(readxl)
+if (!require(vars)) install.packages("vars"); library(vars)
+if (!require(tidyverse)) install.packages("tidyverse"); library(tidyverse)
+if (!require(reshape2)) install.packages("reshape2"); library(reshape2)
+if (!require(lpirfs)) install.packages("lpirfs"); library(lpirfs)
+if (!require(data.table)) install.packages("data.table"); library(data.table)
+if (!require(panelvar)) install.packages("panelvar"); library(panelvar)
+if (!require(plm)) install.packages("plm"); library(plm)
+if (!require(fixest)) install.packages("fixest"); library(fixest)
+```
+
+
+## Data Wrangling to pivot
+
+```{r}
+dat = read_xlsx("Unemployment.xlsx", col_names = FALSE)
+colnames(dat) = dat[5,]
+unemployment_wide = dat[-c(1:5),] # remove first 5 rows
+
+no_na_areas = unemployment_wide %>%
+  group_by(Area_name) %>%
+  drop_na() %>%
+  pull(Area_name)
+
+unemployment = unemployment_wide %>%
+  # Do not need this information, but can put to id.vars if you want for analysis
+  select(-c("Median_Household_Income_2020",
+            "Med_HH_Income_Percent_of_State_Total_2020")) %>%
+  # data.table allows for the patterns element below
+  data.table() %>%
+  # Transform our wide dataframe to a long dataframe
+  melt(id.vars = c("FIPS_code", "State", "Area_name", "Rural_urban_continuum_code_2013",
+                   "Urban_influence_code_2013", "Metro_2013"),
+      measure.vars = patterns(civilian_labor_force = "Civilian_labor_force", 
+                              employed = "Employed",
+                              unemployed = "Unemployed",
+                              unemployment_rate = "Unemployment_rate"),
+      variable.name = "year") %>%
+  # Change the structure of the columns
+  mutate(year = as.numeric(year) + 1999, 
+         civilian_labor_force = as.numeric(civilian_labor_force),
+         employed = as.numeric(employed),
+         unemployed = as.numeric(unemployed),
+         unemployment_rate = 100 * unemployed / civilian_labor_force,
+         State = as.factor(State),
+         Rural_urban_continuum_code_2013 = as.factor(Rural_urban_continuum_code_2013),
+         Urban_influence_code_2013 = as.factor(Urban_influence_code_2013),
+         Metro_2013 = as.factor(Metro_2013)) %>%
+  filter(Area_name %in% no_na_areas, year != 2000)
+
+# All state FIPS codes, likely a better way of doing this
+state_FIPS_codes = c("01000", "02000", "03000", "04000", "05000", "06000", "07000",
+                     "08000", "09000", "10000", "11000", "12000", "13000", "14000",
+                     "15000", "16000", "17000", "18000", "19000", "20000", "21000",
+                     "22000", "23000", "24000", "25000", "26000", "27000", "28000",
+                     "29000", "30000", "31000", "32000", "33000", "34000", "35000",
+                     "36000", "37000", "38000", "39000", "40000", "41000", "42000",
+                     "43000", "44000", "45000", "46000", "47000", "48000", "49000",
+                     "50000", "51000", "52000", "53000", "54000", "55000", "56000",
+                     "72000")
+
+# Subset the dataframe for states and counties for separate analysis
+states = unemployment %>%
+  filter(FIPS_code %in% state_FIPS_codes)
+
+counties = unemployment %>%
+  filter(!(FIPS_code %in% c(state_FIPS_codes, "00000")))
+
+
+# https://apps.bea.gov/regional/downloadzip.cfm
+county_gdp = read.csv("county_gdp.csv")
+
+# GDP is in thousands of dollars
+county_gdp = county_gdp %>%
+  filter(Description == "All industry total ") %>%
+  select(-c(Region, TableName, LineCode, IndustryClassification, Description, Unit)) %>%
+  melt(id.vars = c("GeoFIPS", "GeoName"), variable.name = "year", value.name = "gdp") %>%
+  mutate(GeoFIPS = as.character(str_replace_all(str_replace_all(GeoFIPS, "\"", ""), " ", "")),
+         year = as.numeric(str_replace_all(year, "X", "")),
+         log_gdp = log(as.numeric(gdp) * 1000)) %>%
+  filter(!(GeoFIPS %in% c(state_FIPS_codes, "00000"))) %>%
+  select(-gdp)
+
+counties = left_join(counties, county_gdp, join_by(year, FIPS_code == GeoFIPS))
+```
+
+
+## Summary Statistics and Graphs
+
+```{r}
+# Attempt to recreate own plot about change in employment share 
+# https://www.ers.usda.gov/webdocs/charts/62816/employmentindices2021lausfinal_d.html?v=4565.2
+metro = c(100, 99.9, 96.3, 96.5, 97.5, 98.9, 100, 101.9, 103.6, 105.5, 107.6, 109.1, 110.7, 103.7, 107.3)
+nonmetro = c(100, 99.3, 95.7, 93.3, 93.8, 94, 93.8, 94.4, 94.8, 95.1, 95.9, 96.5, 97.1, 92.4, 94.4)
+
+employed_percentage = data.frame(year = seq(2007, 2021),
+                                 metro, nonmetro)
+
+
+data_set %>%
+  mutate(Metro_2013 = case_when(Metro_2013 == 1 ~ "Metropolitan", TRUE ~ "Nonmetropolitan")) %>%
+  group_by(Metro_2013, year) %>%
+  summarize(mean_unem_rate = mean(unemployment_rate)) %>%
+  ggplot() + 
+  geom_point(aes(x = year, y = mean_unem_rate, color = Metro_2013)) + 
+  geom_line(aes(x = year, y = mean_unem_rate, group = Metro_2013, color = Metro_2013)) +
+  scale_color_brewer(palette = "Dark2") + 
+  labs(title = "Aggregated Unemployment Rates by Metropolitan between 2000 and 2021", 
+       subtitle = "Data sourced from U.S. Department of Agriculture, Economic Research Service",
+       y = "Aggregated Unemployment Rate") +
+  theme_bw() + 
+  theme(axis.title.x = element_blank(),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(size = 8),
+        legend.position = "bottom",
+        legend.title = element_blank())
+
+data_set %>%
+   group_by(Urban_influence_code_2013, year) %>%
+   summarize(mean_unem_rate = mean(unemployment_rate)) %>%
+   ggplot() + 
+   geom_point(aes(x = year, y = mean_unem_rate, color = Urban_influence_code_2013)) + 
+   geom_line(aes(x = year, y = mean_unem_rate, group = Urban_influence_code_2013, color = Urban_influence_code_2013)) +
+   scale_color_brewer(palette = "Dark2") + 
+   labs(title = "Aggregated Unemployment Rates by Metropolitan between 2000 and 2021", 
+        subtitle = "Data sourced from U.S. Department of Agriculture, Economic Research Service",
+        y = "Aggregated Unemployment Rate") +
+   theme_bw() + 
+   theme(axis.title.x = element_blank(),
+         plot.title.position = "plot",
+         plot.subtitle = element_text(size = 8),
+         legend.position = "bottom",
+         legend.title = element_blank())
+
+data_set %>%
+  group_by(Metro_2013) %>%
+  summarize(avg_labor_force = sd(log(civilian_labor_force), na.rm = TRUE))
+
+data_set %>%
+  group_by(year) %>%
+  summarize(corre = cov(log_gdp, unemployment_rate, method = "pearson"))
+```
+
+
+## Start Analysis
+
+```{r}
+data_set = counties %>%
+  mutate(civilian_labor_force = log(civilian_labor_force)) %>%
+  select(Area_name, year, unemployment_rate, Metro_2013, log_gdp, civilian_labor_force)
+
+data_sample = seq(2006, 2016)
+
+counties_lp_nl = lp_nl_panel(data_set = data_set,
+                             data_sample = data_sample,
+                             endog_data = "unemployment_rate",
+                             cumul_mult = TRUE,
+                             shock = "unemployment_rate",
+                             diff_shock = TRUE,
+                             panel_model = "within",
+                             panel_effect = "individual",
+                             robust_cov = "vcovHC",
+                             switching = "Metro_2013",
+                             lag_switching = FALSE,
+                             use_logistic = FALSE,
+                             use_hp = TRUE,
+                             lambda = 6.25,
+                             gamma = 10,
+                             c_exog_data = c("log_gdp", "civilian_labor_force"),
+                             c_fd_exog_data = colnames(data_set)[c(5,6)],
+                             l_fd_exog_data = colnames(data_set)[c(3,5,6)],
+                             lags_fd_exog_data = 1,
+                             confint = 1.96,
+                             hor = 11)
+
+counties_data_nl = data.frame(year = seq(2006, 2016),
+                           s1mean = as.vector(counties_lp_nl$irf_s1_mean),
+                           s1lower = as.vector(counties_lp_nl$irf_s1_low),
+                           s1upper = as.vector(counties_lp_nl$irf_s1_up),
+                           s2mean = as.vector(counties_lp_nl$irf_s2_mean),
+                           s2lower = as.vector(counties_lp_nl$irf_s2_low),
+                           s2upper = as.vector(counties_lp_nl$irf_s2_up))
+
+ggplot() + 
+  geom_line(data = counties_data_nl, aes(x = year, y = s1mean), color = "cadetblue") + 
+  geom_point(data = counties_data_nl, aes(x = year, y = s1mean), color = "cadetblue") +
+  geom_ribbon(data = counties_data_nl, aes(x = year, ymin = s1lower, ymax = s1upper), alpha = 0.3, fill = "cadetblue") +
+  geom_line(data = counties_data_nl, aes(x = year, y = s2mean), color = "coral") + 
+  geom_point(data = counties_data_nl, aes(x = year, y = s2mean), color = "coral") +
+  geom_ribbon(data = counties_data_nl, aes(x = year, ymin = s2lower, ymax = s2upper), alpha = 0.3, fill = "coral") + 
+  scale_x_continuous(breaks = seq(2006, 2016)) + 
+  annotate(geom = "text", x = 2009.5, y = 0.65, label = "Nonmetro", size = 4.5, color = "cadetblue") +
+  annotate(geom = "text", x = 2012.5, y = 0.77, label = "Metro", size = 4.5, color = "coral") +
+  theme_bw() + 
+  geom_vline(xintercept = 2007, color = "black", linetype = "dotdash", lwd = 1.15) + 
+  labs(title = "Non-Linear Local Projection Estimates for Metropolitan Classification",
+       subtitle = "Estimated by lagged of 1 year of the logarithm of GDP and logarithm of Civilian Labor Force",
+       #caption = "Data sourced from Economic Research Reservice at USDA",
+       y = "Estimated Response Coefficient on Unemployment Rate", x = "Year") + 
+  theme(axis.title.y = element_text(size = 9.0),
+        plot.title.position = "plot")
+```
+
+```{r}
+#print regression summaries
+counties_lp_nl$reg_summaries
+```
+
+
+
