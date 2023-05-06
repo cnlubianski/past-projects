@@ -1,0 +1,285 @@
+---
+title: "Survey Weights"
+author: "Corbin Lubianski"
+date: "2023-05-02"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## R Markdown
+
+```{r}
+# Load package
+if (!require(tidyverse)) install.packages("tidyverse"); library(tidyverse)
+if (!require(reshape2)) install.packages("reshape2"); library(reshape2)
+```
+
+
+
+```{r}
+# Load data: https://www.census.gov/programs-surveys/popest/technical-documentation/research/evaluation-estimates/2020-evaluation-estimates/2010s-national-detail.html
+pop_2018_1 = read.csv("NC-EST2020-ALLDATA-C-File17.csv")
+pop_2018_2 = read.csv("NC-EST2020-ALLDATA-P-File18.csv")
+
+population_2018 = rbind(pop_2018_1, pop_2018_2) %>%
+  select(MONTH, AGE, TOT_POP, TOT_MALE, TOT_FEMALE) %>%
+  filter(AGE %in% c(2:19)) %>%
+  group_by(AGE) %>%
+  summarize(TOT_POP = mean(TOT_POP),
+            TOT_FEMALE = mean(TOT_FEMALE),
+            TOT_MALE = mean(TOT_MALE))
+```
+
+```{r}
+# Transfer mean and SE estimates from https://www.cdc.gov/nchs/data/nhsr/nhsr160-508.pdf
+
+# Table 2 (weight in pounds)
+boy_weight_mean = c(30.9, 36.5, 41.0, 46.6, 52.6, 61.0,
+                    69.8, 78.1, 89.8, 102.6, 107.8, 133.2, 143.6,
+                    160.2, 157.2, 170.0, 166.7, 176.2)
+boy_weight_se = c(0.4, 0.8, 0.5, 1.0, 0.9, 1.4, 1.4, 2.3,
+                  2.1, 3.4, 3.2, 3.3, 3.9, 4.2, 3.4, 4.2, 4.3, 3.6)
+girl_weight_mean = c(29.1, 34.0, 40.0, 46.2, 52.3, 60.2,
+                     69.1, 76.9, 90.6, 106.1, 116.9, 125.8, 137.0,
+                     137.5, 144.9, 149.7, 151.6, 156.5)
+girl_weight_se = c(0.2, 0.4, 0.6, 1.0, 1.0, 1.2, 2.0, 1.8,
+                   2.3, 3.0, 2.3, 3.7, 2.2, 3.4, 3.6, 3.6, 3.7, 4.4)
+
+# Table 6 (height in inches)
+boy_height_mean = c(36.0, 39.0, 41.7, 44.4, 46.8, 49.7, 52.0, 53.5, 55.8,
+                    58.8, 60.7, 64.0, 66.6, 67.8, 68.3, 69.0, 69.0, 68.9)
+boy_height_se = c(0.1, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.3, 0.2,
+                 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.2, 0.3, 0.3)
+girl_height_mean = c(35.2, 38.4, 41.3, 44.1, 46.8, 48.9, 51.1, 53.9, 56.3,
+                     59.2, 60.9, 62.2, 63.7, 63.4, 63.7, 64.2, 63.8, 63.9)
+girl_height_se = c(0.1, 0.2, 0.2, 0.3, 0.2, 0.2, 0.3, 0.3, 0.2,
+                   0.3, 0.3, 0.3, 0.3, 0.3, 0.2, 0.3, 0.3, 0.3)
+
+# Define Normal distribution parameters for height and weight 
+parameters = data.frame(age = rep(c(2:19), 2),
+                    sex = c(rep("female", 18), rep("male", 18)),
+                    height_mean = c(girl_height_mean, boy_height_mean),
+                    height_se = c(girl_height_se, boy_height_se),
+                    weight_mean = c(girl_weight_mean, boy_weight_mean),
+                    weight_se = c(girl_weight_se, boy_weight_se))
+```
+
+```{r}
+total_2018_2_18 = sum(population_2018$TOT_POP)
+
+selection_prop_2018 = population_2018 %>%
+  group_by(AGE) %>%
+  summarize(total_proportion = TOT_POP / total_2018_2_18,
+            female_proportion = TOT_FEMALE / total_2018_2_18,
+            male_proportion = TOT_MALE / total_2018_2_18)
+```
+
+```{r}
+demographics = cbind(expand.grid(age = c(2:19), sex = c("female", "male")),
+                     pop_prop = rep(0, 36))
+
+for (case in 1:nrow(demographics)) {
+  for (group in 1:nrow(selection_prop_2018)) {
+    if (demographics[case, 2] == "male" & demographics[case, 1] == selection_prop_2018[group, 1]) {
+      demographics$pop_prop[case] = selection_prop_2018$male_proportion[group]
+    } 
+    if (demographics[case, 2] == "female" & demographics[case, 1] == selection_prop_2018[group, 1]) {
+      demographics$pop_prop[case] = selection_prop_2018$female_proportion[group]
+    }
+  }
+}
+```
+
+```{r}
+sample_set = demographics %>%
+  mutate(survey_weights = runif(nrow(.), 0.01, 1.99),
+         sampling_prob = pop_prop * survey_weights) %>%
+  slice_sample(., n = 1000, replace = TRUE, weight_by = sampling_prob) %>%
+  group_by(age, sex) %>%
+  summarize(representation_prop = n() / nrow(.),
+            survey_weight = pop_prop / representation_prop, across())
+
+
+sample_distributed = left_join(sample_set, parameters, join_by(age, sex)) %>%
+  rowwise %>%
+  mutate(height = rnorm(1, mean = height_mean, sd = height_se),
+         height_weighted = height * survey_weight,
+         weight = rnorm(1, mean = weight_mean, sd = weight_se)) %>%
+  unnest %>%
+  select(-c(height_mean, height_se, weight_mean, weight_se))
+```
+
+```{r}
+# Get true mean to calculate bias later
+height_true_mean = left_join(demographics, parameters, join_by(age, sex)) %>%
+  select(pop_prop, height_mean) %>%
+  summarize(height_true_mean = sum(pop_prop * height_mean)) %>%
+  pull
+```
+
+
+
+## Simulation
+```{r, warning = FALSE}
+generate_data = function(sample_size, multiplier_range) {
+  
+  sample_set = demographics %>%
+  mutate(sampling_bias = runif(nrow(.), 1 - multiplier_range / 2, 1 + multiplier_range / 2),
+         sampling_prob = pop_prop * sampling_bias) %>%
+  slice_sample(., n = sample_size, replace = TRUE, weight_by = sampling_prob) %>%
+  group_by(age, sex) %>%
+  summarize(representation_prop = n() / nrow(.),
+            survey_weight = pop_prop / representation_prop, across())
+  
+  
+  sample_data = left_join(sample_set, parameters, join_by(age, sex)) %>%
+  rowwise %>%
+  mutate(height = rnorm(1, mean = height_mean, sd = height_se),
+         height_weighted = height * survey_weight,
+         weight = rnorm(1, mean = weight_mean, sd = weight_se)) %>%
+  unnest %>%
+  select(-c(height_mean, height_se, weight_mean, weight_se))
+  
+  return(sample_data)
+}
+
+RMSE = function(y, yhat){
+  SSE = sum((y - yhat)^2)
+  return(sqrt(SSE / length(y)))  
+}
+```
+
+```{r}
+set.seed(98)
+
+iterations = 500
+
+cases = expand.grid(sample_sizes = c(500, 5000, 10000),
+                    sampling_bias = c(0.5, 1.5))
+columns = c("case", "iteration", "height_unweighted_bias", "height_weighted_bias",
+            "unweighted_RMSE", "weighted_RMSE", "weight_association_test", "difference_in_coef_test")
+
+results = data.frame(matrix(nrow = 0, ncol = length(columns)))
+colnames(results) = columns
+
+for (case in 1:nrow(cases)) {
+  sample_size = cases$sample_sizes[case]
+  multiplier_range = cases$sampling_bias
+
+  case_storage = data.frame(iteration = seq_len(iterations),
+                       height_unweighted_bias = rep(NA, iterations),
+                       height_weighted_bias = rep(NA, iterations),
+                       unweighted_RMSE = rep(NA, iterations),
+                       weighted_RMSE = rep(NA, iterations),
+                       weight_association_test = rep(NA, iterations),
+                       difference_in_coef_test = rep(NA, iterations))
+  
+  for (i in 1:iterations) {
+    sample_data = generate_data(sample_size = sample_size, multiplier_range = multiplier_range)
+    
+    case_storage$height_unweighted_bias[i] = height_true_mean - mean(sample_data$height)
+    case_storage$height_weighted_bias[i] = height_true_mean - mean(sample_data$height_weighted)
+    
+    
+    weight_association_lm = lm(weight ~ height + height_weighted, sample_data)
+    case_storage$weight_association_test[i] = summary(weight_association_lm)$coefficients[3,4]
+    
+    
+    unweighted = lm(weight ~ height, sample_data)
+    weighted = lm(weight ~ height_weighted, sample_data)
+    
+    unweighted_coef = summary(unweighted)$coefficients
+    weighted_coef = summary(weighted)$coefficients
+    
+    test_stat = t(unweighted_coef[2,1] - weighted_coef[2,1]) * 
+      (vcov(unweighted)[2,2] - vcov(weighted)[2,2]) * 
+      (unweighted_coef[2,1] - weighted_coef[2,1])
+    
+    case_storage$difference_in_coef_test[i] = pchisq(abs(test_stat), 1)
+    
+    case_storage$unweighted_RMSE[i] = RMSE(sample_data$weight, unweighted$fitted.values)
+    case_storage$weighted_RMSE[i] = RMSE(sample_data$weight, weighted$fitted.values)
+  }
+  results = rbind(results, cbind(case = rep(case, iterations), case_storage))
+}
+```
+
+
+## Analysis
+
+```{r}
+#write.csv(results, "results.csv")
+
+reject_table = results %>% 
+  mutate(wa_reject_null = case_when(weight_association_test <= 0.05 ~ "Reject", TRUE ~ "Fail"),
+         dc_reject_null = case_when(difference_in_coef_test <= 0.05 ~ "Reject", TRUE ~ "Fail")) %>%
+  left_join(., cbind(cases, index = c(1:6)), by = c("case" = "index")) %>%
+  select(case, sample_sizes, sampling_bias, wa_reject_null, dc_reject_null)
+
+
+test_counts = reject_table %>%
+  count(sample_sizes, sampling_bias, wa_reject_null, dc_reject_null) %>%
+  mutate(n = paste0(n / iterations * 100, "%"))
+
+
+ggplot(reject_table, aes(x = wa_reject_null, y = dc_reject_null)) + 
+  geom_bin2d() + 
+  facet_grid(rows = vars(sampling_bias), cols = vars(sample_sizes)) + 
+  geom_text(data = test_counts, aes(label = n), color = "white") + 
+  scale_fill_gradient(low = "#56B1F7", high = "#2F3941") + 
+  theme_bw() + 
+  labs(x = "Weight Association Tests", y = "Difference in Coefficients Tests") + 
+  theme(legend.position = "none")
+ggsave("test_results.png")
+```
+
+
+```{r}
+bias = results %>% 
+  group_by(case) %>%
+  summarize(bias_unweighted = abs(mean(height_unweighted_bias)),
+            bias_weighted = abs(mean(height_weighted_bias))) %>%
+  melt(id.vars = "case", variable.name = "weighing", value.name = "bias") %>%
+  mutate(case = case_when(
+    case == 1 ~ "SB = 0.5, N = 500", case == 2 ~ "SB = 0.5, N = 5000",
+    case == 3 ~ "SB = 0.5, N = 10000", case == 4 ~ "SB = 1.5, N = 500",
+    case == 5 ~ "SB = 1.5, N = 5000", case == 6 ~ "SB = 1.5, N = 10000"),
+    case = fct_relevel(case, "SB = 0.5, N = 500", "SB = 0.5, N = 5000", "SB = 0.5, N = 10000",
+                       "SB = 1.5, N = 500", "SB = 1.5, N = 5000", "SB = 1.5, N = 10000"),
+    weighing = case_when(weighing == "bias_unweighted" ~ "Nonweighted Height", TRUE ~ "Weighted Height"))
+  
+ggplot(bias, aes(x = case, y = bias, fill = weighing)) +
+  geom_bar(stat = "identity", position = position_dodge()) + 
+  scale_fill_manual(values = c("deepskyblue4", "firebrick3")) + 
+  labs(y = "Bias", x = "Case") + 
+  theme(legend.position = "bottom", axis.title.x = element_blank(),
+        legend.title = element_blank(), axis.text.x = element_text(size = 7.850))
+ggsave("bias.png")
+```
+
+```{r}
+rmse = results %>% 
+  group_by(case) %>%
+  summarize(rmse_unweighted = mean(unweighted_RMSE),
+            rmse_weighted = mean(weighted_RMSE)) %>%
+  melt(id.vars = "case", variable.name = "weighing", value.name = "RMSE") %>%
+  mutate(case = case_when(
+    case == 1 ~ "SB = 0.5, N = 500", case == 2 ~ "SB = 0.5, N = 5000",
+    case == 3 ~ "SB = 0.5, N = 10000", case == 4 ~ "SB = 1.5, N = 500",
+    case == 5 ~ "SB = 1.5, N = 5000", case == 6 ~ "SB = 1.5, N = 10000"),
+    case = fct_relevel(case, "SB = 0.5, N = 500", "SB = 0.5, N = 5000", "SB = 0.5, N = 10000",
+                       "SB = 1.5, N = 500", "SB = 1.5, N = 5000", "SB = 1.5, N = 10000"),
+    weighing = case_when(weighing == "rmse_unweighted" ~ "Nonweighted Regression", TRUE ~ "Weighted Regression"))
+  
+ggplot(rmse, aes(x = case, y = RMSE, fill = weighing)) +
+  geom_bar(stat = "identity", position = position_dodge()) + 
+  scale_fill_manual(values = c("deepskyblue4", "firebrick3")) + 
+  labs(y = "RMSE", x = "Case") + 
+  theme(legend.position = "bottom", axis.title.x = element_blank(),
+        legend.title = element_blank(), axis.text.x = element_text(size = 7.850))
+ggsave("rmse.png")
+```
+
